@@ -1,0 +1,213 @@
+version: "3.8"
+
+services:
+
+  # ------------------ POSTGRES ------------------
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflowpassword
+      POSTGRES_DB: airflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - bigdata-net
+    restart: unless-stopped
+
+  # ------------------ AIRFLOW ------------------
+  airflow-webserver:
+    image: apache/airflow:2.9.0
+    container_name: airflow-webserver
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__FERNET_KEY: 'YOUR_GENERATED_FERNET_KEY'
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflowpassword@postgres:5432/airflow
+    command: >
+      bash -c "
+      airflow db migrate &&
+      airflow users create --username admin --password admin --firstname admin --lastname admin --role Admin --email admin@example.com || true &&
+      airflow webserver
+      "
+    ports:
+      - "8082:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - bigdata-net
+    restart: unless-stopped
+
+  airflow-scheduler:
+    image: apache/airflow:2.9.0
+    container_name: airflow-scheduler
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__FERNET_KEY: 'YOUR_GENERATED_FERNET_KEY'
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflowpassword@postgres:5432/airflow
+    command: >
+      bash -c "
+      airflow db migrate &&
+      airflow scheduler
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - bigdata-net
+    restart: unless-stopped
+
+  # ------------------ SPARK ------------------
+  spark-master:
+    image: apache/spark:3.5.0
+    container_name: spark-master
+    command: bash -c "/opt/spark/bin/spark-class org.apache.spark.deploy.master.Master"
+    ports:
+      - "7077:7077"
+      - "8081:8080"
+    networks:
+      - bigdata-net
+    restart: unless-stopped
+
+  spark-worker:
+    image: apache/spark:3.5.0
+    container_name: spark-worker
+    command: bash -c "/opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077"
+    ports:
+      - "8083:8080"
+    depends_on:
+      - spark-master
+    networks:
+      - bigdata-net
+    restart: unless-stopped
+
+  # ------------------ ZOOKEEPER ------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    ports:
+      - "2181:2181"
+    networks:
+      - bigdata-net
+    restart: unless-stopped
+
+  # ------------------ KAFKA (FIXED) ------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+    networks:
+      - bigdata-net
+    restart: unless-stopped
+
+  # ------------------ HIVE ------------------
+  hive-server:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hive-server
+    environment:
+      HIVE_METASTORE_DB_HOST: postgres
+      HIVE_METASTORE_DB_NAME: airflow
+      HIVE_METASTORE_DB_USER: airflow
+      HIVE_METASTORE_DB_PASS: airflowpassword
+    ports:
+      - "10000:10000"
+    depends_on:
+      - postgres
+    networks:
+      - bigdata-net
+    restart: unless-stopped
+
+  # ------------------ RAW ------------------
+  raw:
+    image: python:3.10
+    container_name: raw-layer
+    volumes:
+      - ./raw:/app
+      - data_lake:/data
+    working_dir: /app
+    command: sh -c "pip install kafka-python && sleep 20 && python consume.py"
+    depends_on:
+      - kafka
+    networks:
+      - bigdata-net
+    restart: unless-stopped
+
+  # ------------------ BRONZE ------------------
+  bronze:
+    image: python:3.10
+    container_name: bronze-layer
+    volumes:
+      - ./bronze:/app
+      - data_lake:/data
+    working_dir: /app
+    command: sh -c "pip install pandas && sleep 30 && python ingest.py"
+    depends_on:
+      - raw
+    networks:
+      - bigdata-net
+    restart: unless-stopped
+
+  # ------------------ SILVER ------------------
+  silver:
+    image: python:3.10
+    container_name: silver-layer
+    volumes:
+      - ./silver:/app
+      - data_lake:/data
+    working_dir: /app
+    command: sh -c "pip install pandas && sleep 40 && python transform.py"
+    depends_on:
+      - bronze
+    networks:
+      - bigdata-net
+    restart: unless-stopped
+
+  # ------------------ GOLD ------------------
+  gold:
+    image: python:3.10
+    container_name: gold-layer
+    volumes:
+      - ./gold:/app
+      - data_lake:/data
+    working_dir: /app
+    command: sh -c "pip install pandas && sleep 50 && python curate.py"
+    depends_on:
+      - silver
+    networks:
+      - bigdata-net
+    restart: unless-stopped
+
+# ------------------ VOLUMES ------------------
+volumes:
+  postgres_data:
+  data_lake:
+
+# ------------------ NETWORK ------------------
+networks:
+  bigdata-net:
+    driver: bridge

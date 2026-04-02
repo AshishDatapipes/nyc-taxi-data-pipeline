@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Spark
+data/
+checkpoints/
+
+# Airflow
+logs/
+
+# OS
+.DS_Store
+
+# VS Code
+.vscode/
