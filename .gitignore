@@ -1,17 +1,68 @@
+# =========================
 # Python
-__pycache__/
-*.pyc
+# =========================
 venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
 
-# Spark
+# =========================
+# Environment / Secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Data
+# =========================
 data/
+raw/
+*.csv
+*.parquet
+*.json
+
+# =========================
+# Spark
+# =========================
 checkpoints/
+spark-warehouse/
+metastore_db/
+*.log
 
+# =========================
 # Airflow
-logs/
+# =========================
+airflow/logs/
+airflow/__pycache__/
+airflow/.pytest_cache/
 
-# OS
-.DS_Store
-
-# VS Code
+# =========================
+# IDE
+# =========================
 .vscode/
+.idea/
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Temporary / Backup files
+# =========================
+*.tmp
+*.temp
+*.swp
+*.swo
+*.bak
+*.save
+# Unused dependency artifacts
+postgresql-42.7.3.jar.1
+spark-sql-kafka-0-10_2.12-3.5.0.jar.1
+spark-token-provider-kafka-0-10_2.12-3.5.0.jar.1
+jars/kafka-clients-3.4.1.jar
