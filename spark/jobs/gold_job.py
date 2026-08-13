@@ -4,8 +4,7 @@ from pyspark.sql.functions import (
     to_date,
     count,
     sum,
-    avg,
-    max as spark_max
+    avg
 )
 
 from utils.metadata import (
@@ -19,6 +18,12 @@ from config.db_config import (
     DB_PROPERTIES
 )
 
+# -------------------------------------------------
+# Configuration
+# -------------------------------------------------
+
+BATCH_SIZE = 50000
+PIPELINE_NAME = "gold"
 
 # -------------------------------------------------
 # Spark Session
@@ -32,151 +37,294 @@ spark = (
 
 spark.sparkContext.setLogLevel("WARN")
 
-
 # -------------------------------------------------
-# Read Metadata
+# Read Gold Metadata
 # -------------------------------------------------
-
-pipeline_name = "gold"
 
 last_processed_id = get_last_processed_id(
     spark,
-    pipeline_name
+    PIPELINE_NAME
 )
 
 print(
     f"Last processed Silver ID for Gold: {last_processed_id}"
 )
 
-
 # -------------------------------------------------
-# Read only new Silver records
-# -------------------------------------------------
-
-print("Reading new Silver records...")
-
-silver_query = f"""
-(
-    SELECT *
-    FROM silver_taxi
-    WHERE id > {last_processed_id}
-) AS silver_increment
-"""
-
-
-silver_df = (
-    spark.read
-    .jdbc(
-        url=JDBC_URL,
-        table=silver_query,
-        properties=DB_PROPERTIES
-    )
-)
-
-
-record_count = silver_df.count()
-
-print(
-    f"New Silver records: {record_count}"
-)
-
-
-# -------------------------------------------------
-# No new data handling
+# Process Silver in batches
 # -------------------------------------------------
 
-if record_count == 0:
+current_id = last_processed_id
+total_processed = 0
 
-    print("No new data available for Gold processing")
+while True:
 
-    update_metadata(
-        pipeline_name="gold",
-        last_processed_id=last_processed_id,
-        status="NO_DATA"
+    batch_end_id = current_id + BATCH_SIZE
+
+    print("---------------------------------------")
+    print(
+        f"Reading Silver IDs > {current_id} "
+        f"and <= {batch_end_id}"
     )
 
-    spark.stop()
+    # -------------------------------------------------
+    # Read current Silver batch
+    # -------------------------------------------------
 
-else:
+    silver_query = f"""
+    (
+        SELECT *
+        FROM silver_taxi
+        WHERE id > {current_id}
+          AND id <= {batch_end_id}
+        ORDER BY id
+    ) AS silver_batch
+    """
 
-
-    # ---------------------------------------------
-    # Create trip date
-    # ---------------------------------------------
-
-    gold_df = (
-        silver_df
-        .withColumn(
-            "trip_date",
-            to_date("tpep_pickup_datetime")
+    silver_df = (
+        spark.read
+        .jdbc(
+            url=JDBC_URL,
+            table=silver_query,
+            properties=DB_PROPERTIES
         )
     )
 
+    batch_count = silver_df.count()
 
-    # ---------------------------------------------
-    # Daily Aggregation
-    # ---------------------------------------------
+    print(
+        f"Silver records in batch: {batch_count}"
+    )
 
-    gold_summary = (
-        gold_df
+    # -------------------------------------------------
+    # No more data
+    # -------------------------------------------------
+
+    if batch_count == 0:
+
+        print("No new Silver records available.")
+        break
+
+    # -------------------------------------------------
+    # Determine affected dates
+    # -------------------------------------------------
+
+    affected_dates = (
+        silver_df
+        .select(
+            to_date(
+                col("tpep_pickup_datetime")
+            ).alias("trip_date")
+        )
+        .where(
+            col("trip_date").isNotNull()
+        )
+        .distinct()
+    )
+
+    affected_date_count = affected_dates.count()
+
+    print(
+        f"Affected trip dates: {affected_date_count}"
+    )
+
+    # -------------------------------------------------
+    # Get affected date range
+    # -------------------------------------------------
+
+    affected_dates.createOrReplaceTempView(
+        "affected_dates"
+    )
+
+    # -------------------------------------------------
+    # Recalculate complete daily aggregates
+    #
+    # IMPORTANT:
+    # We calculate from ALL Silver records for the
+    # affected dates, not just the current batch.
+    # -------------------------------------------------
+
+    print("Recalculating affected Gold dates...")
+
+    silver_for_gold = (
+        spark.read
+        .jdbc(
+            url=JDBC_URL,
+            table="""
+            (
+                SELECT *
+                FROM silver_taxi
+                WHERE tpep_pickup_datetime IS NOT NULL
+            ) AS silver_all
+            """,
+            properties=DB_PROPERTIES
+        )
+    )
+
+    gold_df = (
+        silver_for_gold
+        .withColumn(
+            "trip_date",
+            to_date(
+                col("tpep_pickup_datetime")
+            )
+        )
+        .join(
+            affected_dates,
+            on="trip_date",
+            how="inner"
+        )
         .groupBy("trip_date")
         .agg(
             count("*").alias("total_trips"),
             sum("total_amount").alias("total_revenue"),
             avg("fare_amount").alias("average_fare"),
-            avg("trip_distance").alias("average_trip_distance"),
+            avg("trip_distance").alias(
+                "average_trip_distance"
+            ),
             avg("tip_amount").alias("average_tip"),
-            sum("passenger_count").alias("total_passengers")
+            sum("passenger_count").alias(
+                "total_passengers"
+            )
         )
     )
 
+    print("Gold preview:")
 
-    print("Gold Preview")
-
-    gold_summary.show(
+    gold_df.show(
+        10,
         truncate=False
     )
 
+    # -------------------------------------------------
+    # Collect Gold rows
+    #
+    # We use PostgreSQL UPSERT because trip_date is
+    # the PRIMARY KEY.
+    # -------------------------------------------------
 
-    # ---------------------------------------------
-    # Write Gold
-    # ---------------------------------------------
+    gold_rows = gold_df.collect()
 
     print(
-        "Writing to gold_daily_summary..."
+        f"Gold rows to upsert: {len(gold_rows)}"
     )
 
+    # -------------------------------------------------
+    # UPSERT into PostgreSQL
+    # -------------------------------------------------
 
-    (
-        gold_summary.write
-        .mode("append")
-        .jdbc(
-            url=JDBC_URL,
-            table="gold_daily_summary",
-            properties=DB_PROPERTIES
+    if len(gold_rows) > 0:
+
+        import psycopg2
+
+        connection = psycopg2.connect(
+            host="postgres",
+            port=5432,
+            database="taxi",
+            user="airflow",
+            password="airflowpassword"
         )
-    )
 
+        cursor = connection.cursor()
 
-    # ---------------------------------------------
-    # Update Metadata
-    # ---------------------------------------------
+        upsert_sql = """
+        INSERT INTO gold_daily_summary (
+            trip_date,
+            total_trips,
+            total_revenue,
+            average_fare,
+            average_trip_distance,
+            average_tip,
+            total_passengers
+        )
+        VALUES (
+            %s,
+            %s,
+            %s,
+            %s,
+            %s,
+            %s,
+            %s
+        )
+        ON CONFLICT (trip_date)
+        DO UPDATE SET
+            total_trips = EXCLUDED.total_trips,
+            total_revenue = EXCLUDED.total_revenue,
+            average_fare = EXCLUDED.average_fare,
+            average_trip_distance =
+                EXCLUDED.average_trip_distance,
+            average_tip = EXCLUDED.average_tip,
+            total_passengers =
+                EXCLUDED.total_passengers
+        """
+
+        for row in gold_rows:
+
+            cursor.execute(
+                upsert_sql,
+                (
+                    row["trip_date"],
+                    row["total_trips"],
+                    row["total_revenue"],
+                    row["average_fare"],
+                    row["average_trip_distance"],
+                    row["average_tip"],
+                    row["total_passengers"]
+                )
+            )
+
+        connection.commit()
+
+        cursor.close()
+        connection.close()
+
+        print(
+            "Gold UPSERT completed successfully."
+        )
+
+    # -------------------------------------------------
+    # Update checkpoint
+    # -------------------------------------------------
 
     max_id = get_max_id(
         silver_df
     )
 
-
     update_metadata(
-        pipeline_name="gold",
+        pipeline_name=PIPELINE_NAME,
         last_processed_id=max_id,
         status="SUCCESS"
     )
 
+    current_id = max_id
+
+    total_processed += batch_count
 
     print(
-        f"Gold load completed. Metadata updated: {max_id}"
+        f"Gold checkpoint updated: {max_id}"
+    )
+
+    print(
+        f"Total Silver records processed: "
+        f"{total_processed}"
     )
 
 
+# -------------------------------------------------
+# Final Status
+# -------------------------------------------------
+
+print("---------------------------------------")
+print(
+    f"Gold load completed after processing "
+    f"{total_processed} Silver records."
+)
+
+print(
+    f"Final Gold checkpoint: {current_id}"
+)
+
+print("---------------------------------------")
+
 spark.stop()
+

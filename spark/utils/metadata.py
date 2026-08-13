@@ -67,3 +67,67 @@ def update_metadata(pipeline_name, last_processed_id, status):
 
     cursor.close()
     conn.close()
+
+def get_last_processed_offset():
+    """
+    Returns the last processed Kafka offset for Bronze.
+    """
+
+    conn = psycopg2.connect(
+        host=DB_HOST,
+        database=DB_NAME,
+        user=DB_PROPERTIES["user"],
+        password=DB_PROPERTIES["password"]
+    )
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT last_processed_offset
+        FROM pipeline_metadata
+        WHERE pipeline_name = 'bronze'
+        """
+    )
+
+    result = cursor.fetchone()
+
+    cursor.close()
+    conn.close()
+
+    if result is None or result[0] is None:
+        return 0
+
+    return result[0]
+
+
+def update_bronze_offset(offset):
+    """
+    Updates the last successfully processed Kafka offset for Bronze.
+    """
+
+    conn = psycopg2.connect(
+        host=DB_HOST,
+        database=DB_NAME,
+        user=DB_PROPERTIES["user"],
+        password=DB_PROPERTIES["password"]
+    )
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE pipeline_metadata
+        SET
+            last_processed_offset = %s,
+            last_run = CURRENT_TIMESTAMP,
+            status = 'SUCCESS'
+        WHERE pipeline_name = 'bronze'
+        """,
+        (offset,)
+    )
+
+    conn.commit()
+
+    cursor.close()
+    conn.close()

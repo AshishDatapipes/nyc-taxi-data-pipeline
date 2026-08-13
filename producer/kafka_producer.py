@@ -8,22 +8,19 @@ from kafka import KafkaProducer
 # -----------------------------------
 # Kafka Configuration
 # -----------------------------------
-KAFKA_BROKER = "kafka:9092"
+KAFKA_BROKER = "localhost:29092"
 TOPIC_NAME = "taxi-rides"
 
 
 # -----------------------------------
-# Read parquet dataset
+# Read january dataset
 # -----------------------------------
 df = pd.read_parquet(
     "data/raw/yellow_tripdata_2024-01.parquet"
 )
 
+df = df.head(1000)
 
-# -----------------------------------
-# Limit rows for testing
-# -----------------------------------
-df = df.head(100)
 
 print(f"Loaded {len(df)} rows")
 
@@ -68,7 +65,7 @@ for index, row in df.iterrows():
         f"Sent record {index + 1}/{TOTAL_RECORDS}"
     )
 
-    time.sleep(delay)
+    time.sleep(1)
 
 
 producer.flush()
@@ -76,3 +73,6 @@ producer.close()
 
 
 print("All records sent successfully!")
+
+producer.flush()
+producer.close()
