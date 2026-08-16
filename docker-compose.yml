@@ -203,6 +203,8 @@ services:
 
     ports:
       - "2181:2181"
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
 
     networks:
       - bigdata-net
@@ -244,7 +246,9 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
 
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-
+        
+    volumes:
+      - kafka_data:/var/lib/kafka/data
     networks:
       - bigdata-net
 
@@ -311,6 +315,8 @@ services:
 
 volumes:
   postgres_data:
+  kafka_data:
+  zookeeper_data:
 
 
 # ============================================================
