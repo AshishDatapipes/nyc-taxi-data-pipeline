@@ -8,7 +8,7 @@ from kafka import KafkaProducer
 # -----------------------------------
 # Kafka Configuration
 # -----------------------------------
-KAFKA_BROKER = "localhost:29092"
+KAFKA_BROKER = "kafka:9092"
 TOPIC_NAME = "taxi-rides"
 
 
