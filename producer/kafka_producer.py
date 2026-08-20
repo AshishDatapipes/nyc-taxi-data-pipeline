@@ -8,7 +8,7 @@ from kafka import KafkaProducer
 # -----------------------------------
 # Kafka Configuration
 # -----------------------------------
-KAFKA_BROKER = "kafka:9092"
+KAFKA_BROKER = "localhost:29092"
 TOPIC_NAME = "taxi-rides"
 
 
@@ -73,6 +73,3 @@ producer.close()
 
 
 print("All records sent successfully!")
-
-producer.flush()
-producer.close()

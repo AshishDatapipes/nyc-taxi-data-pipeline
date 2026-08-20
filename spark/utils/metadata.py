@@ -29,7 +29,9 @@ def get_max_id(df):
     Returns the maximum ID from a DataFrame.
     """
 
-    max_id = df.select(spark_max("id")).collect()[0][0]
+    max_id = df.select(
+        spark_max("id")
+    ).collect()[0][0]
 
     if max_id is None:
         return 0
@@ -37,9 +39,14 @@ def get_max_id(df):
     return max_id
 
 
-def update_metadata(pipeline_name, last_processed_id, status):
+def update_metadata(
+    pipeline_name,
+    last_processed_id,
+    status
+):
     """
-    Updates the metadata table after a successful pipeline run.
+    Updates the metadata table after
+    a successful pipeline run.
     """
 
     conn = psycopg2.connect(
@@ -60,7 +67,11 @@ def update_metadata(pipeline_name, last_processed_id, status):
             status = %s
         WHERE pipeline_name = %s
         """,
-        (last_processed_id, status, pipeline_name)
+        (
+            last_processed_id,
+            status,
+            pipeline_name
+        )
     )
 
     conn.commit()
@@ -68,9 +79,16 @@ def update_metadata(pipeline_name, last_processed_id, status):
     cursor.close()
     conn.close()
 
-def get_last_processed_offset():
+
+def get_bronze_metadata():
     """
-    Returns the last processed Kafka offset for Bronze.
+    Returns Bronze Kafka processing metadata.
+
+    Returns:
+        (
+            last_processed_offset,
+            kafka_generation
+        )
     """
 
     conn = psycopg2.connect(
@@ -84,7 +102,9 @@ def get_last_processed_offset():
 
     cursor.execute(
         """
-        SELECT last_processed_offset
+        SELECT
+            last_processed_offset,
+            kafka_generation
         FROM pipeline_metadata
         WHERE pipeline_name = 'bronze'
         """
@@ -95,15 +115,34 @@ def get_last_processed_offset():
     cursor.close()
     conn.close()
 
-    if result is None or result[0] is None:
-        return 0
+    if result is None:
+        return 0, 1
 
-    return result[0]
+    last_processed_offset = (
+        result[0]
+        if result[0] is not None
+        else 0
+    )
+
+    kafka_generation = (
+        result[1]
+        if result[1] is not None
+        else 1
+    )
+
+    return (
+        last_processed_offset,
+        kafka_generation
+    )
 
 
-def update_bronze_offset(offset):
+def update_bronze_metadata(
+    offset,
+    kafka_generation
+):
     """
-    Updates the last successfully processed Kafka offset for Bronze.
+    Updates Bronze Kafka processing metadata
+    after a successful Bronze load.
     """
 
     conn = psycopg2.connect(
@@ -120,11 +159,15 @@ def update_bronze_offset(offset):
         UPDATE pipeline_metadata
         SET
             last_processed_offset = %s,
+            kafka_generation = %s,
             last_run = CURRENT_TIMESTAMP,
             status = 'SUCCESS'
         WHERE pipeline_name = 'bronze'
         """,
-        (offset,)
+        (
+            offset,
+            kafka_generation
+        )
     )
 
     conn.commit()
